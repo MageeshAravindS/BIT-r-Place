@@ -2,8 +2,8 @@
 
 A massive multiplayer collaborative pixel art canvas, inspired by Reddit's r/place. Built to handle real-time concurrency with a highly optimized binary storage engine and a fluid, "cyber-aesthetic" frontend.
 
-![Project Banner](https://via.placeholder.com/1000x500?text=BIT+Place+Screenshot) 
-*(Replace this link with a screenshot of your actual app)*
+<img width="1886" height="969" alt="image" src="https://github.com/user-attachments/assets/3553fbf8-c100-4bf2-a897-ed372d853293" />
+
 
 ## ✨ Features
 
