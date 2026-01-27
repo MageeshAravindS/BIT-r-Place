@@ -6,8 +6,7 @@ const { OAuth2Client } = require('google-auth-library');
 
 // --- CONFIGURATION ---
 // 👇 PASTE YOUR MONGODB CONNECTION STRING INSIDE THE QUOTES BELOW 👇
-const MONGO_URI = "mongodb+srv://admin:mongoose@cluster0.c1mtouj.mongodb.net/?appName=Cluster0"; 
-
+const MONGO_URI = "mongodb+srv://admin:mongoose@cluster0.c1mtouj.mongodb.net/bitplace?appName=Cluster0";
 const PORT = process.env.PORT || 7860;
 const CANVAS_WIDTH = 800;
 const CANVAS_HEIGHT = 450;
