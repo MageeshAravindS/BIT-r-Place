@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+    
+<head>
+    <meta charset="UTF-8">
+    <title>BIT Place Admin</title>
+    <style>
+        body { font-family: sans-serif; background: #111; color: white; padding: 20px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { padding: 10px; border: 1px solid #333; text-align: left; }
+        th { background: #222; }
+        tr:nth-child(even) { background: #1a1a1a; }
+        .color-box { width: 20px; height: 20px; display: inline-block; vertical-align: middle; border: 1px solid white; }
+    </style>
+</head>
+<body>
+    <h1>🕵️ Pixel Tracker</h1>
+    <button onclick="fetchData()">Refresh Log</button>
+    <p id="status">Loading...</p>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Time</th>
+                <th>User Email</th>
+                <th>Name</th>
+                <th>Location</th>
+                <th>Color</th>
+            </tr>
+        </thead>
+        <tbody id="log-table"></tbody>
+    </table>
+
+    <script>
+        // Simple password check
+        const password = prompt("Enter Admin Password:");
+        if (password !== "mongoose") { // Change "admin123" to whatever you want
+            document.body.innerHTML = "<h1 style='color:red; text-align:center; margin-top:50px;'>ACCESS DENIED 🔒</h1>";
+            throw new Error("Unauthorized");
+        }
+        // REPLACE THIS WITH YOUR BACKEND URL
+        const API_URL = "https://azinw-bit-place-backend.hf.space/api/history";
+
+        // Palette map to show actual colors
+        const PALETTE = [
+            '#FFFFFF', '#000000', '#FF4500', '#FFA800', '#FFD635', '#00A368', '#7EED56', '#2450A4',
+            '#3690EA', '#51E9F4', '#811E9F', '#B44AC0', '#FF99AA', '#9C6926', '#898D90', '#D4D7D9'
+        ];
+
+        async function fetchData() {
+            document.getElementById('status').innerText = "Fetching...";
+            try {
+                const res = await fetch(API_URL);
+                const data = await res.json();
+                
+                const tbody = document.getElementById('log-table');
+                tbody.innerHTML = ''; // Clear old data
+
+                data.forEach(entry => {
+                    const row = document.createElement('tr');
+                    const colorHex = PALETTE[entry.color] || '#000';
+                    
+                    row.innerHTML = `
+                        <td>${new Date(entry.time).toLocaleTimeString()}</td>
+                        <td style="color: #4ade80">${entry.who}</td>
+                        <td>${entry.name}</td>
+                        <td>(${entry.x}, ${entry.y})</td>
+                        <td>
+                            <span class="color-box" style="background-color: ${colorHex}"></span>
+                            ID: ${entry.color}
+                        </td>
+                    `;
+                    tbody.appendChild(row);
+                });
+                document.getElementById('status').innerText = `Loaded ${data.length} entries.`;
+            } catch (err) {
+                document.getElementById('status').innerText = "Error loading data. Is backend running?";
+                console.error(err);
+            }
+        }
+
+        // Load immediately
+        fetchData();
+    </script>
+</body>
+</html>
