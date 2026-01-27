@@ -8,7 +8,8 @@ import { HexColorPicker } from "react-colorful";
 // --- CONFIGURATION ---
 // const SOCKET_URL = "http://localhost:3000"; // For local testing
 const SOCKET_URL = "https://azinw-bit-place-backend.hf.space"; // Live backend
-const CANVAS_SIZE = 480;
+const CANVAS_WIDTH = 800;
+const CANVAS_HEIGHT = 450;
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 30;
 
@@ -60,8 +61,7 @@ function App() {
   const [currentColorHex, setCurrentColorHex] = useState(PALETTE[1]);
   const [showPicker, setShowPicker] = useState(false);
   const [cooldownTimer, setCooldownTimer] = useState(0);
-  // NEW: State for the confirmation modal
-  const [pendingPixel, setPendingPixel] = useState(null); // { x, y, colorIdx, colorHex }
+  const [pendingPixel, setPendingPixel] = useState(null); 
 
   // Canvas Interaction State
   const [hoverCoords, setHoverCoords] = useState(null);
@@ -74,8 +74,6 @@ function App() {
   // --- SOCKET CONNECTION ---
   useEffect(() => {
     if (!authToken) return;
-
-    // Ensure we only have one socket connection
     if (socket) socket.close();
 
     const newSocket = io(SOCKET_URL, {
@@ -85,8 +83,7 @@ function App() {
     });
 
     newSocket.on("connect_error", (err) => {
-      console.error("Socket connection error:", err);
-      // Only show toast if it's a real auth error, not just polling noise
+      console.error("Socket error:", err);
       if (err.message !== "xhr poll error") {
           setLoginError(err.message);
           toast.error(`Connection failed: ${err.message}`);
@@ -94,16 +91,12 @@ function App() {
     });
 
     newSocket.on("connect", () => {
-        console.log("✅ Connected to Server! ID:", newSocket.id);
+        console.log("✅ Connected!");
         setLoginError(null);
     });
 
     newSocket.on("disconnect", (reason) => {
-       console.log("❌ Disconnected:", reason);
-       if (reason === "io server disconnect") {
-           // Server kicked us off, probably auth issue
-           setAuthToken(null);
-       }
+       if (reason === "io server disconnect") setAuthToken(null);
     });
 
     setSocket(newSocket);
@@ -115,16 +108,15 @@ function App() {
       ctx.imageSmoothingEnabled = false;
 
       const pixelData = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : buffer;
-      const imageData = ctx.createImageData(CANVAS_SIZE, CANVAS_SIZE);
+      
+      // CHANGED: Use Width/Height for Image Data
+      const imageData = ctx.createImageData(CANVAS_WIDTH, CANVAS_HEIGHT);
       const data = imageData.data;
 
       for (let i = 0; i < pixelData.length; i++) {
         const colorId = pixelData[i];
-        // Safety filter for corrupted data
         let finalColorId = colorId;
-        if (colorId < 0 || colorId >= PALETTE_RGB.length) {
-             finalColorId = 0; // Default to white
-        }
+        if (colorId < 0 || colorId >= PALETTE_RGB.length) finalColorId = 0;
 
         const [r, g, b] = PALETTE_RGB[finalColorId];
         const idx = i * 4;
@@ -140,23 +132,13 @@ function App() {
       ctx.fillRect(x, y, 1, 1);
     });
 
-    newSocket.on("cooldown-sync", ({ remaining }) => {
-        console.log("⏰ Cooldown sync:", remaining);
-        setCooldownTimer(remaining)
-    });
-
+    newSocket.on("cooldown-sync", ({ remaining }) => setCooldownTimer(remaining));
     newSocket.on("cooldown-error", (data) => {
         toast.error(data.message);
         setCooldownTimer(data.remaining);
     });
 
-    // Cleanup on unmount or token change
-    return () => {
-        console.log("Cleaning up socket connection");
-        newSocket.off();
-        newSocket.close();
-        setSocket(null);
-    };
+    return () => { newSocket.close(); setSocket(null); };
   }, [authToken]);
 
   // --- TIMER ---
@@ -185,7 +167,6 @@ function App() {
     if (isDragging) {
         setIsDragging(false);
         const dist = Math.hypot(e.clientX - dragStart.current.x, e.clientY - dragStart.current.y);
-        // If moved less than 5px, count it as a click
         if (dist < 5) initiatePixelPlacement(e);
     }
   };
@@ -203,74 +184,54 @@ function App() {
 
     if(!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
-    const scaleX = CANVAS_SIZE / rect.width;
-    const scaleY = CANVAS_SIZE / rect.height;
+    
+    // CHANGED: Calculate scale based on Width/Height separately
+    const scaleX = CANVAS_WIDTH / rect.width;
+    const scaleY = CANVAS_HEIGHT / rect.height;
 
     const x = Math.floor((e.clientX - rect.left) * scaleX);
     const y = Math.floor((e.clientY - rect.top) * scaleY);
 
-    if (x >= 0 && x < CANVAS_SIZE && y >= 0 && y < CANVAS_SIZE) {
+    // CHANGED: Boundary check
+    if (x >= 0 && x < CANVAS_WIDTH && y >= 0 && y < CANVAS_HEIGHT) {
         setHoverCoords({ x, y });
     } else {
         setHoverCoords(null);
     }
   };
 
-  // --- NEW: Initiate Placement (Opens Modal) ---
   const initiatePixelPlacement = () => {
     if (!socket || !hoverCoords) return;
-    // Don't open modal if on cooldown
     if (cooldownTimer > 0) {
         toast.error(`Cooldown! Wait ${cooldownTimer}s`, { id: 'cooldown-toast' });
         return;
     }
     const { x, y } = hoverCoords;
-
-    // 1. Find closest palette color index for the backend
     const colorIdx = findClosestPaletteIndex(currentColorHex);
-
-    // 2. Set pending state to open confirmation modal
     setPendingPixel({ x, y, colorIdx, colorHex: currentColorHex });
   };
 
-  // --- NEW: Confirm Placement (Sends Data) ---
   const confirmPlacement = () => {
       if (!pendingPixel || !socket) return;
-
       const { x, y, colorIdx, colorHex } = pendingPixel;
 
-      // 1. Optimistic Update (Draw immediately)
       const ctx = canvasRef.current.getContext("2d");
       ctx.fillStyle = colorHex;
       ctx.fillRect(x, y, 1, 1);
 
-      // 2. Send to server
-      console.log(`Attempting to place color ${colorIdx} at ${x}, ${y}`);
       socket.emit("place-pixel", { x, y, color: colorIdx });
-
-      // 3. Reset UI
       setCooldownTimer(30);
       toast.success("Pixel Placed!", { duration: 1000, icon: '🎨' });
-      setPendingPixel(null); // Close modal
+      setPendingPixel(null);
   };
-
 
   // --- RENDER ---
-  const handleLoginSuccess = (res) => {
-      console.log("Google Login Success. Token length:", res.credential.length);
-      setAuthToken(res.credential);
-      setLoginError(null);
-  };
-
-  const handleLoginError = () => {
-      console.error("Google Login Failed");
-      setLoginError("Login Failed. Please try again.");
-  };
+  const handleLoginSuccess = (res) => { setAuthToken(res.credential); setLoginError(null); };
+  const handleLoginError = () => { setLoginError("Login Failed. Please try again."); };
 
   if (!authToken) {
     return (
         <div style={styles.loginContainer}>
-            {/* Toaster placed here for static positioning during login */}
             <Toaster position="bottom-center" toastOptions={styles.toastOptions} />
             <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} style={styles.loginCard}>
                 <h1 style={styles.title}>BIT PLACE</h1>
@@ -286,43 +247,28 @@ function App() {
     );
   }
 
+  // Calculate Aspect Ratio for CSS to keep it responsive
+  const aspectRatio = `${CANVAS_WIDTH} / ${CANVAS_HEIGHT}`;
+
   return (
     <div style={styles.appContainer}>
-      {/* Toaster placed at root for static positioning relative to viewport */}
       <Toaster position="bottom-center" toastOptions={styles.toastOptions} />
 
-      {/* --- STATIC FIXED HEADER --- */}
       <motion.div initial={{ y: -50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} style={styles.header}>
         <div style={styles.logoGroup}>
             <h2 style={styles.logoText}>BIT PLACE</h2>
             <div style={{display: 'flex', gap: '10px', alignItems: 'center'}}>
-                <button
-                    onClick={() => setShowPicker(!showPicker)}
-                    style={{...styles.btn, background: showPicker ? '#3b82f6' : '#333', color: showPicker ? 'white' : '#888'}}
-                >
-                    # COLOR
-                </button>
-                <button
-                    onClick={() => setShowGrid(!showGrid)}
-                    style={{...styles.btn, background: showGrid ? '#3b82f6' : '#333', color: showGrid ? 'white' : '#888'}}
-                >
-                    # GRID
-                </button>
+                <button onClick={() => setShowPicker(!showPicker)} style={{...styles.btn, background: showPicker ? '#3b82f6' : '#333', color: showPicker ? 'white' : '#888'}}># COLOR</button>
+                <button onClick={() => setShowGrid(!showGrid)} style={{...styles.btn, background: showGrid ? '#3b82f6' : '#333', color: showGrid ? 'white' : '#888'}}># GRID</button>
                  <button onClick={() => setTransform({x:0, y:0, k:1})} style={styles.btn}>↺ RESET VIEW</button>
             </div>
         </div>
 
-        {/* Quick Palette */}
         <div style={styles.palette}>
           {PALETTE.slice(0, 10).map((hex, idx) => (
             <motion.div key={idx} onClick={() => setCurrentColorHex(hex)}
               whileHover={{ scale: 1.2, y: -2 }} whileTap={{ scale: 0.9 }}
-              style={{
-                  ...styles.colorSwatch,
-                  backgroundColor: hex,
-                  border: currentColorHex.toUpperCase() === hex ? '2px solid white' : '1px solid rgba(255,255,255,0.1)',
-                  boxShadow: currentColorHex.toUpperCase() === hex ? `0 0 10px ${hex}` : 'none',
-              }}
+              style={{ ...styles.colorSwatch, backgroundColor: hex, border: currentColorHex.toUpperCase() === hex ? '2px solid white' : '1px solid rgba(255,255,255,0.1)', boxShadow: currentColorHex.toUpperCase() === hex ? `0 0 10px ${hex}` : 'none' }}
             />
           ))}
         </div>
@@ -332,30 +278,18 @@ function App() {
         </motion.div>
       </motion.div>
 
-      {/* Floating Picker (Fixed position) */}
       <AnimatePresence>
         {showPicker && (
-            <motion.div
-                initial={{ opacity: 0, y: -20, scale: 0.9 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: -20, scale: 0.9 }}
-                style={styles.floatingPicker}
-            >
+            <motion.div initial={{ opacity: 0, y: -20, scale: 0.9 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: -20, scale: 0.9 }} style={styles.floatingPicker}>
                 <HexColorPicker color={currentColorHex} onChange={setCurrentColorHex} />
             </motion.div>
         )}
       </AnimatePresence>
 
-      {/* --- NEW: CONFIRMATION MODAL --- */}
       <AnimatePresence>
         {pendingPixel && (
             <div style={styles.modalOverlay} className="modal-overlay">
-                <motion.div
-                    initial={{ scale: 0.8, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
-                    exit={{ scale: 0.8, opacity: 0 }}
-                    style={styles.modalBox}
-                >
+                <motion.div initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.8, opacity: 0 }} style={styles.modalBox}>
                     <h3 style={styles.modalTitle}>Confirm Pixel?</h3>
                     <div style={{display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '20px', justifyContent: 'center'}}>
                         <div style={{width: '30px', height: '30px', background: pendingPixel.colorHex, border: '2px solid white', borderRadius: '4px'}}></div>
@@ -370,33 +304,23 @@ function App() {
         )}
       </AnimatePresence>
 
-
-      {/* --- ZOOMABLE CANVAS AREA --- */}
-      <div
-        ref={containerRef}
-        style={styles.canvasContainer}
-        onWheel={handleWheel}
-        onMouseDown={handleMouseDown}
-        onMouseUp={handleMouseUp}
-        onMouseMove={handleMouseMove}
-        onMouseLeave={() => { setIsDragging(false); setHoverCoords(null); }}
-      >
-        <motion.div
-            initial={{ scale: 0.5, opacity: 0 }}
-            animate={{ scale: 1, opacity: 1 }}
-            transition={{ type: "spring", stiffness: 120, damping: 15 }}
-            style={{ width: '100%', height: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center' }}
-        >
+      <div ref={containerRef} style={styles.canvasContainer} onWheel={handleWheel} onMouseDown={handleMouseDown} onMouseUp={handleMouseUp} onMouseMove={handleMouseMove} onMouseLeave={() => { setIsDragging(false); setHoverCoords(null); }}>
+        <motion.div initial={{ scale: 0.5, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ type: "spring", stiffness: 120, damping: 15 }} style={{ width: '100%', height: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+            
             <div style={{
                 ...styles.canvasWrapper,
-                // Apply zoom/pan transform here
                 transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.k})`,
+                // CHANGED: Explicit Aspect Ratio
+                aspectRatio: aspectRatio, 
+                width: 'auto', 
+                height: '85vmin', // You can change this to width: '85vmin', height: 'auto' if you prefer width-based scaling
                 cursor: isDragging ? 'grabbing' : (cooldownTimer > 0 ? 'not-allowed' : 'crosshair')
             }}>
-                <canvas ref={canvasRef} width={CANVAS_SIZE} height={CANVAS_SIZE} style={styles.canvas} />
+                <canvas ref={canvasRef} width={CANVAS_WIDTH} height={CANVAS_HEIGHT} style={styles.canvas} />
 
                 {showGrid && (
-                    <svg width="100%" height="100%" viewBox={`0 0 ${CANVAS_SIZE} ${CANVAS_SIZE}`} xmlns="http://www.w3.org/2000/svg" style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none', zIndex: 5 }}>
+                    // CHANGED: ViewBox uses Width/Height
+                    <svg width="100%" height="100%" viewBox={`0 0 ${CANVAS_WIDTH} ${CANVAS_HEIGHT}`} xmlns="http://www.w3.org/2000/svg" style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none', zIndex: 5 }}>
                         <defs>
                             <pattern id="grid" width="1" height="1" patternUnits="userSpaceOnUse">
                                 <path d="M 1 0 L 0 0 0 1" fill="none" stroke="rgba(0,0,0,0.3)" strokeWidth="0.05"/>
@@ -406,14 +330,14 @@ function App() {
                     </svg>
                 )}
 
-                {/* Hover Reticle */}
                 {hoverCoords && !isDragging && !pendingPixel && (
                     <div style={{
                         position: 'absolute',
-                        left: `${(hoverCoords.x / CANVAS_SIZE) * 100}%`,
-                        top: `${(hoverCoords.y / CANVAS_SIZE) * 100}%`,
-                        width: `${(1 / CANVAS_SIZE) * 100}%`,
-                        height: `${(1 / CANVAS_SIZE) * 100}%`,
+                        // CHANGED: Percentage uses correct dimension
+                        left: `${(hoverCoords.x / CANVAS_WIDTH) * 100}%`,
+                        top: `${(hoverCoords.y / CANVAS_HEIGHT) * 100}%`,
+                        width: `${(1 / CANVAS_WIDTH) * 100}%`,
+                        height: `${(1 / CANVAS_HEIGHT) * 100}%`,
                         pointerEvents: 'none',
                         zIndex: 10,
                         boxSizing: 'border-box',
@@ -424,17 +348,8 @@ function App() {
             </div>
         </motion.div>
 
-        {/* Floating Cursor Bubble */}
         {!isDragging && !pendingPixel && (
-            <div style={{
-                position: 'fixed',
-                left: mousePos.x + 20,
-                top: mousePos.y + 20,
-                width: '24px', height: '24px', borderRadius: '50%',
-                backgroundColor: currentColorHex,
-                border: '2px solid white', boxShadow: '0 2px 5px rgba(0,0,0,0.5)',
-                pointerEvents: 'none', zIndex: 9999, transition: 'background-color 0.1s'
-            }} />
+            <div style={{ position: 'fixed', left: mousePos.x + 20, top: mousePos.y + 20, width: '24px', height: '24px', borderRadius: '50%', backgroundColor: currentColorHex, border: '2px solid white', boxShadow: '0 2px 5px rgba(0,0,0,0.5)', pointerEvents: 'none', zIndex: 9999, transition: 'background-color 0.1s' }} />
         )}
       </div>
     </div>
