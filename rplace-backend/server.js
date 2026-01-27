@@ -6,12 +6,12 @@ const { OAuth2Client } = require('google-auth-library');
 
 // --- CONFIGURATION ---
 // 👇 PASTE YOUR MONGODB CONNECTION STRING INSIDE THE QUOTES BELOW 👇
-const MONGO_URI = "UR MONGO URI";
+const MONGO_URI = "Your MONGO URI";
 const PORT = process.env.PORT || 7860;
 const CANVAS_WIDTH = 800;
 const CANVAS_HEIGHT = 450;
 const COOLDOWN_SECONDS = 5;
-const GOOGLE_CLIENT_ID = "338224390635-cpfurodcu459640g1s5l675bkjkho170.apps.googleusercontent.com";
+const GOOGLE_CLIENT_ID = "Your Google ID";
 
 // --- SETUP ---
 const app = express();
