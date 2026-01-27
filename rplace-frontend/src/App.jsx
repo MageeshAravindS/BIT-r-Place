@@ -51,10 +51,13 @@ function App() {
   const containerRef = useRef(null);
   const [socket, setSocket] = useState(null);
 
-  // --- STATE ---
-  const [authToken, setAuthToken] = useState(null);
+  // --- AUTH STATE (PERSISTENT) ---
+  // 1. Try to load token from localStorage immediately
+  const [authToken, setAuthToken] = useState(() => {
+      return localStorage.getItem('bitplace_token') || null;
+  });
   const [loginError, setLoginError] = useState(null);
-  const [showIntro, setShowIntro] = useState(true); // Default to TRUE to show guide
+  const [showIntro, setShowIntro] = useState(true);
 
   // UI State
   const [currentColorHex, setCurrentColorHex] = useState(PALETTE[1]);
@@ -68,11 +71,12 @@ function App() {
   const [transform, setTransform] = useState({ x: 0, y: 0, k: 1 });
   const [showGrid, setShowGrid] = useState(false);
   
-  // Mouse Dragging
+  // Mouse Dragging Logic Refs
   const [isDragging, setIsDragging] = useState(false);
-  const dragStart = useRef({ x: 0, y: 0 });
+  const dragOrigin = useRef({ x: 0, y: 0 });
+  const lastPanPoint = useRef({ x: 0, y: 0 });
   
-  // Touch Long Press
+  // Touch Logic Refs
   const longPressTimer = useRef(null);
   const isTouchInteraction = useRef(false);
 
@@ -88,13 +92,23 @@ function App() {
     });
 
     newSocket.on("connect_error", (err) => {
-      if (err.message !== "xhr poll error") {
-          setLoginError(err.message);
+      console.error("Socket Error:", err.message);
+      
+      // 2. DETECT EXPIRED TOKEN
+      // If server rejects the token, clear it so user can login again
+      if (err.message === "Invalid Google Token" || err.message === "Authentication token missing") {
+          localStorage.removeItem('bitplace_token');
+          setAuthToken(null);
+          setLoginError("Session expired. Please login again.");
+      } else if (err.message !== "xhr poll error") {
           toast.error(`Connection failed: ${err.message}`);
       }
     });
 
-    newSocket.on("connect", () => console.log("✅ Connected!"));
+    newSocket.on("connect", () => {
+        console.log("✅ Connected!");
+        setLoginError(null);
+    });
 
     setSocket(newSocket);
 
@@ -138,60 +152,50 @@ function App() {
 
   // --- CONTROLS ---
 
-  // 1. IMPROVED WHEEL (Trackpad Pinch Support)
   const handleWheel = (e) => {
     e.preventDefault();
-    // Trackpads usually trigger Ctrl+Wheel for pinch gestures
-    // We adjust sensitivity based on that
     const isPinch = e.ctrlKey;
     const scaleFactor = isPinch ? 0.01 : 0.001;
-    
     const scaleAmount = -e.deltaY * scaleFactor;
     const newScale = Math.min(Math.max(transform.k * (1 + scaleAmount), MIN_ZOOM), MAX_ZOOM);
     setTransform(prev => ({ ...prev, k: newScale }));
   };
 
-  // 2. MOUSE DOWN (Left Click Check)
   const handleMouseDown = (e) => {
-    // Ignore Right Click (2) or Middle Click (1)
     if (e.button !== 0) return; 
 
     if (e.target.closest('.react-colorful') || e.target.closest('button') || e.target.closest('.modal-overlay')) return;
     
     setIsDragging(true);
-    dragStart.current = { x: e.clientX, y: e.clientY };
+    dragOrigin.current = { x: e.clientX, y: e.clientY };
+    lastPanPoint.current = { x: e.clientX, y: e.clientY };
     isTouchInteraction.current = false;
   };
 
-  // 3. MOUSE UP (Click vs Drag)
   const handleMouseUp = (e) => {
-    // Strict Left Click Only
     if (e.button !== 0) return;
 
     if (isDragging) {
         setIsDragging(false);
-        const dist = Math.hypot(e.clientX - dragStart.current.x, e.clientY - dragStart.current.y);
-        // If moved less than 5px, it's a click. 
-        // We only allow this if it wasn't a touch interaction (handled separately)
+        const dist = Math.hypot(e.clientX - dragOrigin.current.x, e.clientY - dragOrigin.current.y);
+        
         if (dist < 5 && !isTouchInteraction.current) {
              initiatePixelPlacement(e);
         }
     }
   };
 
-  // 4. MOUSE MOVE (Panning)
   const handleMouseMove = (e) => {
     setMousePos({ x: e.clientX, y: e.clientY });
 
     if (isDragging) {
-        const dx = e.clientX - dragStart.current.x;
-        const dy = e.clientY - dragStart.current.y;
+        const dx = e.clientX - lastPanPoint.current.x;
+        const dy = e.clientY - lastPanPoint.current.y;
         setTransform(prev => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
-        dragStart.current = { x: e.clientX, y: e.clientY };
+        lastPanPoint.current = { x: e.clientX, y: e.clientY };
         return;
     }
 
-    // Hover Calculation
     if(!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const scaleX = CANVAS_WIDTH / rect.width;
@@ -206,16 +210,15 @@ function App() {
     }
   };
 
-  // 5. TOUCH CONTROLS (Long Press Logic)
   const handleTouchStart = (e) => {
-      if (e.touches.length > 1) return; // Ignore multi-touch (pinch)
+      if (e.touches.length > 1) return; 
       isTouchInteraction.current = true;
-      setIsDragging(true); // Allow panning immediately
+      setIsDragging(true);
       
       const touch = e.touches[0];
-      dragStart.current = { x: touch.clientX, y: touch.clientY };
+      dragOrigin.current = { x: touch.clientX, y: touch.clientY }; 
+      lastPanPoint.current = { x: touch.clientX, y: touch.clientY }; 
 
-      // Update hover coords immediately for the long press target
       const rect = canvasRef.current.getBoundingClientRect();
       const scaleX = CANVAS_WIDTH / rect.width;
       const scaleY = CANVAS_HEIGHT / rect.height;
@@ -224,28 +227,29 @@ function App() {
 
       if (x >= 0 && x < CANVAS_WIDTH && y >= 0 && y < CANVAS_HEIGHT) {
         setHoverCoords({ x, y });
-        // Start Long Press Timer (500ms)
         longPressTimer.current = setTimeout(() => {
-            setIsDragging(false); // Stop panning
-            initiatePixelPlacement(); // Trigger placement
-            if(navigator.vibrate) navigator.vibrate(50); // Haptic feedback
+            setIsDragging(false); 
+            initiatePixelPlacement(); 
+            if(navigator.vibrate) navigator.vibrate(50);
         }, 500);
       }
   };
 
   const handleTouchMove = (e) => {
-      // If user moves finger > 10px, cancel the long press (it's a pan)
       const touch = e.touches[0];
-      const dist = Math.hypot(touch.clientX - dragStart.current.x, touch.clientY - dragStart.current.y);
+      const dist = Math.hypot(touch.clientX - dragOrigin.current.x, touch.clientY - dragOrigin.current.y);
       
       if (dist > 10) {
           clearTimeout(longPressTimer.current);
-          handleMouseMove(e.touches[0]); // Delegate to standard pan logic
+          const dx = touch.clientX - lastPanPoint.current.x;
+          const dy = touch.clientY - lastPanPoint.current.y;
+          setTransform(prev => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
+          lastPanPoint.current = { x: touch.clientX, y: touch.clientY };
       }
   };
 
   const handleTouchEnd = () => {
-      clearTimeout(longPressTimer.current); // Cancel timer on release
+      clearTimeout(longPressTimer.current);
       setIsDragging(false);
   };
 
@@ -269,13 +273,18 @@ function App() {
       ctx.fillRect(x, y, 1, 1);
 
       socket.emit("place-pixel", { x, y, color: colorIdx });
-      setCooldownTimer(30);
+      setCooldownTimer(5); // Optimistic UI update, Server will correct if needed
       toast.success("Pixel Placed!", { duration: 1000, icon: '🎨' });
       setPendingPixel(null);
   };
 
   // --- RENDER ---
-  const handleLoginSuccess = (res) => { setAuthToken(res.credential); setLoginError(null); };
+  const handleLoginSuccess = (res) => {
+      // 3. SAVE TOKEN ON LOGIN
+      localStorage.setItem('bitplace_token', res.credential);
+      setAuthToken(res.credential);
+      setLoginError(null);
+  };
 
   if (!authToken) {
     return (
@@ -300,7 +309,6 @@ function App() {
     <div style={styles.appContainer}>
       <Toaster position="bottom-center" toastOptions={styles.toastOptions} />
 
-      {/* HEADER */}
       <motion.div initial={{ y: -50, opacity: 0 }} animate={{ y: 0, opacity: 1 }} style={styles.header}>
         <div style={styles.logoGroup}>
             <h2 style={styles.logoText}>BIT PLACE</h2>
@@ -326,7 +334,6 @@ function App() {
         </motion.div>
       </motion.div>
 
-      {/* WELCOME / CONTROLS MODAL */}
       <AnimatePresence>
         {showIntro && (
             <div style={styles.modalOverlay}>
@@ -360,7 +367,6 @@ function App() {
         )}
       </AnimatePresence>
 
-      {/* CONFIRMATION MODAL */}
       <AnimatePresence>
         {pendingPixel && (
             <div style={styles.modalOverlay} className="modal-overlay">
@@ -388,7 +394,6 @@ function App() {
         onMouseMove={handleMouseMove} 
         onMouseLeave={() => { setIsDragging(false); setHoverCoords(null); }}
         
-        // Touch Events
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
@@ -448,7 +453,7 @@ const styles = {
     palette: { display: 'flex', gap: '6px', background: '#222', padding: '6px', borderRadius: '10px', border: '1px solid #333' },
     colorSwatch: { width: '24px', height: '24px', borderRadius: '50%', cursor: 'pointer' },
     timerBadge: { padding: '8px 16px', borderRadius: '8px', fontWeight: 'bold', fontSize: '0.8rem', fontFamily: 'monospace', border: '1px solid rgba(255,255,255,0.05)' },
-    canvasContainer: { flex: 1, marginTop: '80px', overflow: 'hidden', background: 'radial-gradient(circle at center, #222 0%, #111 100%)', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', zIndex: 1, touchAction: 'none' }, // Added touchAction none
+    canvasContainer: { flex: 1, marginTop: '80px', overflow: 'hidden', background: 'radial-gradient(circle at center, #222 0%, #111 100%)', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', zIndex: 1, touchAction: 'none' },
     canvasWrapper: { position: 'relative', boxShadow: '0 0 50px rgba(0,0,0,0.5)', backgroundColor: '#fff', transition: 'transform 0.05s ease-out' },
     canvas: { display: 'block', width: '100%', height: '100%', imageRendering: 'pixelated', background: 'white' },
     modalOverlay: { position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000 },
@@ -457,8 +462,6 @@ const styles = {
     modalButtons: { display: 'flex', gap: '20px', marginTop: '20px', justifyContent: 'center' },
     confirmBtn: { background: '#3b82f6', color: 'white', border: 'none', padding: '10px 20px', borderRadius: '4px', cursor: 'pointer', fontFamily: 'inherit', fontSize: '0.8rem', fontWeight: 'bold' },
     cancelBtn: { background: 'transparent', color: '#888', border: '1px solid #888', padding: '10px 20px', borderRadius: '4px', cursor: 'pointer', fontFamily: 'inherit', fontSize: '0.8rem' },
-    
-    // INTRO CARD STYLES
     introCard: { background: '#1a1a1a', border: '1px solid #333', borderRadius: '16px', padding: '40px', maxWidth: '500px', width: '90%', textAlign: 'center', color: 'white', boxShadow: '0 25px 60px rgba(0,0,0,0.9)' },
     controlsList: { textAlign: 'left', margin: '30px 0', display: 'flex', flexDirection: 'column', gap: '15px', fontSize: '0.9rem', color: '#ccc' },
     controlItem: { display: 'flex', alignItems: 'center', gap: '15px', background: 'rgba(255,255,255,0.05)', padding: '10px', borderRadius: '8px' }
