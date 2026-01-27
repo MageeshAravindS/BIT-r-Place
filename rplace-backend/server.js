@@ -1,116 +1,134 @@
-const express = require("express");
-const http = require("http");
+const express = require('express');
+const http = require('http');
 const { Server } = require("socket.io");
-const fs = require("fs");
-const path = require("path");
-const cors = require("cors");
-const { OAuth2Client } = require("google-auth-library");
-
-// --- CONFIGURATION ---
-// TODO: PASTE YOUR GOOGLE CLIENT ID HERE
-const GOOGLE_CLIENT_ID = "338224390635-cpfurodcu459640g1s5l675bkjkho170.apps.googleusercontent.com";
-const ALLOWED_DOMAIN = "bitsathy.ac.in"; 
-
-const PORT = 3001;
-const CANVAS_SIZE = 480;
-const COOLDOWN_MS = 30000; 
-const SNAPSHOT_FILE = path.join(__dirname, "canvas.dat");
+const fs = require('fs');
+const path = require('path');
+const { OAuth2Client } = require('google-auth-library');
 
 const app = express();
-app.use(cors());
 const server = http.createServer(app);
-const io = new Server(server, {
-    cors: { origin: "*", methods: ["GET", "POST"] }
+
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  next();
 });
+
+const io = new Server(server, {
+  cors: { origin: "*", methods: ["GET", "POST"] }
+});
+
+const PORT = process.env.PORT || 7860;
+const GOOGLE_CLIENT_ID = "338224390635-cpfurodcu459640g1s5l675bkjkho170.apps.googleusercontent.com";
 const client = new OAuth2Client(GOOGLE_CLIENT_ID);
+
+const CANVAS_WIDTH = 800;
+const CANVAS_HEIGHT = 450;
+const DATA_FILE = path.join(__dirname, 'canvas_v4.dat');
+const HISTORY_FILE = path.join(__dirname, 'history.json');
+
+// --- COOLDOWN SETTING (5 Seconds) ---
+const COOLDOWN_SECONDS = 5;
 
 // --- STATE ---
 let canvasBuffer;
-const lastPlaceTime = new Map(); // Key: Email (String) -> Timestamp
+let historyLog = [];
+const userCooldowns = new Map(); 
 
-// Load Canvas
-try {
-    canvasBuffer = fs.readFileSync(SNAPSHOT_FILE);
-    console.log("Loaded existing canvas.");
-} catch (e) {
-    canvasBuffer = Buffer.alloc(CANVAS_SIZE * CANVAS_SIZE, 255);
-    console.log("Created new blank canvas.");
+if (fs.existsSync(DATA_FILE)) {
+  canvasBuffer = fs.readFileSync(DATA_FILE);
+  console.log("🎨 Loaded canvas.");
+} else {
+  canvasBuffer = Buffer.alloc(CANVAS_WIDTH * CANVAS_HEIGHT, 0);
+  console.log("⬜ Created new canvas.");
 }
 
-// Auto-Save
-setInterval(() => {
-    fs.writeFile(SNAPSHOT_FILE, canvasBuffer, () => {});
-}, 30000);
+if (fs.existsSync(HISTORY_FILE)) {
+  try {
+    historyLog = JSON.parse(fs.readFileSync(HISTORY_FILE));
+  } catch (e) { historyLog = []; }
+}
 
-// --- MIDDLEWARE: AUTHENTICATION ---
-// This runs BEFORE the connection is accepted
+// --- MIDDLEWARE ---
 io.use(async (socket, next) => {
-    try {
-        const token = socket.handshake.auth.token;
-        if (!token) return next(new Error("Authentication error: No token provided"));
+  const token = socket.handshake.auth.token;
+  if (!token) return next(new Error("Authentication token missing"));
 
-        // Verify with Google
-        const ticket = await client.verifyIdToken({
-            idToken: token,
-            audience: GOOGLE_CLIENT_ID,
-        });
-        const payload = ticket.getPayload();
-        const email = payload.email;
-
-        // Domain Check
-        // Note: For testing, you can comment this 'if' block out to allow gmail.com
-        if (!email.endsWith(`@${ALLOWED_DOMAIN}`)) {
-            return next(new Error(`Access Denied: Must use a @${ALLOWED_DOMAIN} email.`));
-        }
-
-        // Attach email to socket for later use
-        socket.userEmail = email;
-        next();
-    } catch (err) {
-        console.log("Auth Failed:", err.message);
-        next(new Error("Authentication failed"));
-    }
-});
-
-// --- SOCKET LOGIC ---
-io.on("connection", (socket) => {
-    const userId = socket.userEmail; // We now use the verified Email
-    console.log(`Connected: ${socket.id} | User: ${userId}`);
-
-    socket.emit("canvas-init", canvasBuffer);
-
-    // Sync Cooldown
-    const lastTime = lastPlaceTime.get(userId) || 0;
-    const now = Date.now();
-    if (now - lastTime < COOLDOWN_MS) {
-        socket.emit("cooldown-sync", { remaining: Math.ceil((COOLDOWN_MS - (now - lastTime)) / 1000) });
-    }
-
-    socket.on("place-pixel", ({ x, y, color }) => {
-        // Validation
-        if (!Number.isInteger(x) || x < 0 || x >= CANVAS_SIZE) return;
-        if (!Number.isInteger(y) || y < 0 || y >= CANVAS_SIZE) return;
-        if (!Number.isInteger(color) || color < 0 || color > 255) return;
-
-        // Cooldown Check (Using Email)
-        const currentNow = Date.now();
-        const currentLastTime = lastPlaceTime.get(userId) || 0;
-        
-        if (currentNow - currentLastTime < COOLDOWN_MS) {
-            const remaining = Math.ceil((COOLDOWN_MS - (currentNow - currentLastTime)) / 1000);
-            socket.emit("cooldown-error", { message: `Wait ${remaining}s`, remaining });
-            return;
-        }
-
-        // Execution
-        const index = (y * CANVAS_SIZE) + x;
-        canvasBuffer[index] = color;
-        lastPlaceTime.set(userId, currentNow);
-
-        io.emit("pixel-update", { x, y, color });
+  try {
+    const ticket = await client.verifyIdToken({
+        idToken: token,
+        audience: GOOGLE_CLIENT_ID
     });
+    const payload = ticket.getPayload();
+    socket.data.email = payload.email;
+    socket.data.name = payload.name;
+    next();
+  } catch (err) {
+    next(new Error("Invalid Google Token"));
+  }
 });
+
+io.on('connection', (socket) => {
+  const userEmail = socket.data.email;
+  console.log(`👤 Connected: ${userEmail}`);
+
+  // 1. SEND CANVAS
+  socket.emit('canvas-init', Array.from(canvasBuffer));
+
+  // 2. CHECK COOLDOWN ON CONNECTION
+  const lastTime = userCooldowns.get(userEmail) || 0;
+  const elapsed = (Date.now() - lastTime) / 1000;
+  
+  if (elapsed < COOLDOWN_SECONDS) {
+      const remaining = Math.ceil(COOLDOWN_SECONDS - elapsed);
+      socket.emit('cooldown-sync', { remaining });
+  }
+
+  socket.on('place-pixel', ({ x, y, color }) => {
+    if (x < 0 || x >= CANVAS_WIDTH || y < 0 || y >= CANVAS_HEIGHT) return;
+    if (color < 0 || color > 15) return; 
+
+    // 3. VALIDATE COOLDOWN
+    const now = Date.now();
+    const lastUserTime = userCooldowns.get(userEmail) || 0;
+    const timeDiff = (now - lastUserTime) / 1000;
+
+    if (timeDiff < COOLDOWN_SECONDS) {
+        const waitTime = Math.ceil(COOLDOWN_SECONDS - timeDiff);
+        socket.emit('cooldown-error', { 
+            message: `Wait ${waitTime}s!`, 
+            remaining: waitTime 
+        });
+        return; 
+    }
+
+    // 4. PLACE PIXEL
+    const index = (y * CANVAS_WIDTH) + x;
+    canvasBuffer[index] = color;
+    userCooldowns.set(userEmail, now);
+
+    io.emit('pixel-update', { x, y, color });
+
+    // 5. LOG HISTORY
+    const entry = {
+        who: userEmail,
+        name: socket.data.name,
+        x, y, color,
+        time: new Date().toISOString()
+    };
+    historyLog.push(entry);
+    if (historyLog.length > 10000) historyLog.shift();
+  });
+});
+
+app.get('/api/history', (req, res) => {
+    res.json(historyLog.reverse());
+});
+
+setInterval(() => {
+  fs.writeFile(DATA_FILE, canvasBuffer, () => {});
+  fs.writeFile(HISTORY_FILE, JSON.stringify(historyLog, null, 2), () => {});
+}, 5000); 
 
 server.listen(PORT, () => {
-    console.log(`🚀 Server running on http://localhost:${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
